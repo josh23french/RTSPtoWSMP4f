@@ -1,3 +1,5 @@
+// THIS SUCKS.
+
 if (!Uint8Array.prototype.slice) {
   Object.defineProperty(Uint8Array.prototype, 'slice', {
     value: function(begin, end) {
@@ -12,21 +14,13 @@ var ms = new MediaSource();
 var queue = [];
 var ws;
 
-function pushPacket(arr) {
-  var view = new Uint8Array(arr);
-  if (verbose) {
-    console.log("got", arr.byteLength, "bytes.  Values=", view[0], view[1], view[2], view[3], view[4]);
-  }
-  data = arr;
+function pushPacket(data) {
   if (!streamingStarted) {
     sourceBuffer.appendBuffer(data);
     streamingStarted = true;
     return;
   }
   queue.push(data);
-  if (verbose) {
-    console.log("queue push:", queue.length);
-  }
   if (!sourceBuffer.updating) {
     loadPacket();
   }
@@ -35,15 +29,7 @@ function pushPacket(arr) {
 function loadPacket() {
   if (!sourceBuffer.updating) {
     if (queue.length > 0) {
-      inp = queue.shift();
-      if (verbose) {
-        console.log("queue PULL:", queue.length);
-      }
-      var view = new Uint8Array(inp);
-      if (verbose) {
-        console.log("writing buffer with", view[0], view[1], view[2], view[3], view[4]);
-      }
-      sourceBuffer.appendBuffer(inp);
+      sourceBuffer.appendBuffer(queue.shift());
     } else {
       streamingStarted = false;
     }
@@ -83,7 +69,6 @@ function opened() {
     }
   };
 }
-var livestream = document.getElementById('livestream');
 
 function Utf8ArrayToStr(array) {
   var out, i, len, c;
@@ -112,6 +97,8 @@ function Utf8ArrayToStr(array) {
   }
   return out;
 }
+
+var livestream = document.getElementById('livestream');
 
 function startup() {
   ms.addEventListener('sourceopen', opened, false);

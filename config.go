@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/deepch/vdk/av"
 )
 
@@ -29,12 +35,13 @@ type ServerST struct {
 
 //StreamST struct
 type StreamST struct {
-	URL      string `json:"url"`
-	Status   bool   `json:"status"`
-	OnDemand bool   `json:"on_demand"`
-	RunLock  bool   `json:"-"`
-	Codecs   []av.CodecData
-	Cl       map[string]viewer
+	URL        string `json:"url"`
+	Status     bool   `json:"status"`
+	OnDemand   bool   `json:"on_demand"`
+	RunLock    bool   `json:"-"`
+	Codecs     []av.CodecData
+	Cl         map[string]viewer
+	Screenshot *bytes.Buffer
 }
 
 type viewer struct {
@@ -90,6 +97,66 @@ func loadConfig() *ConfigST {
 	return &tmp
 }
 
+func loadConfig2() *ConfigST {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Credentials: credentials.NewCredentials(&credentials.EnvProvider{}),
+		Region:      aws.String("us-east-1"),
+	}))
+	svc := dynamodb.New(sess)
+	input := &dynamodb.QueryInput{
+		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+			":v1": {
+				S: aws.String("lighthouse-studio"),
+			},
+		},
+		KeyConditionExpression: aws.String("studio = :v1"),
+		TableName:              aws.String("lighthouse-studio-cameras"),
+	}
+	result, err := svc.Query(input)
+
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case dynamodb.ErrCodeProvisionedThroughputExceededException:
+				fmt.Println(dynamodb.ErrCodeProvisionedThroughputExceededException, aerr.Error())
+			case dynamodb.ErrCodeResourceNotFoundException:
+				fmt.Println(dynamodb.ErrCodeResourceNotFoundException, aerr.Error())
+			case dynamodb.ErrCodeRequestLimitExceeded:
+				fmt.Println(dynamodb.ErrCodeRequestLimitExceeded, aerr.Error())
+			case dynamodb.ErrCodeInternalServerError:
+				fmt.Println(dynamodb.ErrCodeInternalServerError, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+		}
+		panic("Error querying DDB for cameras...")
+	}
+	tmp := loadConfig()
+	for _, item := range result.Items {
+		name, ok := item["name"]
+		if !ok {
+			fmt.Println("DDB entry missing name - skipping")
+			continue
+		}
+
+		url, ok := item["rtsp-url-high"]
+		if !ok {
+			fmt.Println("DDB entry missing rtsp-url-high - skipping")
+			continue
+		}
+
+		tmp.Streams[*name.S] = StreamST{
+			URL: *url.S,
+			Cl:  make(map[string]viewer),
+		}
+	}
+	return tmp
+}
+
 func (element *ConfigST) cast(uuid string, pck av.Packet) {
 	element.mutex.Lock()
 	defer element.mutex.Unlock()
@@ -100,7 +167,7 @@ func (element *ConfigST) cast(uuid string, pck av.Packet) {
 	}
 }
 
-func (element *ConfigST) ext(suuid string) bool {
+func (element *ConfigST) exists(suuid string) bool {
 	element.mutex.Lock()
 	defer element.mutex.Unlock()
 	_, ok := element.Streams[suuid]
@@ -115,7 +182,7 @@ func (element *ConfigST) coAd(suuid string, codecs []av.CodecData) {
 	element.Streams[suuid] = t
 }
 
-func (element *ConfigST) coGe(suuid string) []av.CodecData {
+func (element *ConfigST) codecGet(suuid string) []av.CodecData {
 	for i := 0; i < 100; i++ {
 		element.mutex.RLock()
 		tmp, ok := element.Streams[suuid]
@@ -129,6 +196,26 @@ func (element *ConfigST) coGe(suuid string) []av.CodecData {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil
+}
+
+func (element *ConfigST) screenshotGet(suuid string) *bytes.Buffer {
+	element.mutex.RLock()
+	defer element.mutex.RUnlock()
+	stream, ok := element.Streams[suuid]
+	if !ok {
+		return nil
+	}
+	return stream.Screenshot
+}
+
+func (element *ConfigST) screenshotSet(suuid string, buf *bytes.Buffer) {
+	element.mutex.RLock()
+	defer element.mutex.RUnlock()
+	stream, ok := element.Streams[suuid]
+	if !ok {
+		return
+	}
+	stream.Screenshot = buf
 }
 
 func (element *ConfigST) clAd(suuid string) (string, chan av.Packet) {
@@ -153,7 +240,7 @@ func (element *ConfigST) list() (string, []string) {
 	}
 	return fist, res
 }
-func (element *ConfigST) clDe(suuid, cuuid string) {
+func (element *ConfigST) clientDelete(suuid, cuuid string) {
 	element.mutex.Lock()
 	defer element.mutex.Unlock()
 	delete(element.Streams[suuid].Cl, cuuid)

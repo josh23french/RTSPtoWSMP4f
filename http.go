@@ -1,15 +1,16 @@
 package main
 
 import (
-	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/deepch/vdk/av"
 	"github.com/deepch/vdk/format/mp4f"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/net/websocket"
 )
 
@@ -37,6 +38,23 @@ func serveHTTP() {
 			"version":  time.Now().String(),
 		})
 	})
+	router.GET("/screenshot/:size/:suuid", func(c *gin.Context) {
+		size := c.Param("size")
+		if size != "low" && size != "high" {
+			c.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+		suuid := c.Param("suuid")
+		log.Debug().Msgf("screenshot(%v, %v)", size, suuid)
+		screenshot := Config.screenshotGet(suuid)
+
+		c.Writer.Header().Set("Content-Type", "image/jpeg")
+		c.Writer.Header().Set("Content-Length", strconv.Itoa(len(screenshot.Bytes())))
+		if _, err := c.Writer.Write(screenshot.Bytes()); err != nil {
+			log.Error().Err(err).Msg("unable to write image.")
+		}
+		return
+	})
 	router.GET("/ws/:suuid", func(c *gin.Context) {
 		handler := websocket.Handler(ws)
 		handler.ServeHTTP(c.Writer, c.Request)
@@ -44,41 +62,41 @@ func serveHTTP() {
 	router.StaticFS("/static", http.Dir("web/static"))
 	err := router.Run(Config.Server.HTTPPort)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatal().Err(err).Msg("Error running server")
 	}
 }
 func ws(ws *websocket.Conn) {
 	defer ws.Close()
 	suuid := ws.Request().FormValue("suuid")
-	log.Println("Request", suuid)
-	if !Config.ext(suuid) {
-		log.Println("Stream Not Found")
+	log.Info().Msgf("Request: %v", suuid)
+	if !Config.exists(suuid) {
+		log.Warn().Msgf("Stream Not Found: %v", suuid)
 		return
 	}
 	Config.RunIFNotRun(suuid)
 	ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	cuuid, ch := Config.clAd(suuid)
-	defer Config.clDe(suuid, cuuid)
-	codecs := Config.coGe(suuid)
+	defer Config.clientDelete(suuid, cuuid)
+	codecs := Config.codecGet(suuid)
 	if codecs == nil {
-		log.Println("Codecs Error")
+		log.Error().Msg("Codecs Error")
 		return
 	}
 	for i, codec := range codecs {
 		if codec.Type().IsAudio() && codec.Type() != av.AAC {
-			log.Println("Track", i, "Audio Codec Work Only AAC")
+			log.Info().Msgf("Track %i Audio Codec Work Only AAC", i)
 		}
 	}
 	muxer := mp4f.NewMuxer(nil)
 	err := muxer.WriteHeader(codecs)
 	if err != nil {
-		log.Println("muxer.WriteHeader", err)
+		log.Error().Err(err).Msg("muxer.WriteHeader")
 		return
 	}
 	meta, init := muxer.GetInit(codecs)
 	err = websocket.Message.Send(ws, append([]byte{9}, meta...))
 	if err != nil {
-		log.Println("websocket.Message.Send", err)
+		log.Error().Err(err).Msg("websocket.Message.Send")
 		return
 	}
 	err = websocket.Message.Send(ws, init)
@@ -101,7 +119,7 @@ func ws(ws *websocket.Conn) {
 	for {
 		select {
 		case <-noVideo.C:
-			log.Println("noVideo")
+			log.Debug().Msg("noVideo")
 			return
 		case pck := <-ch:
 			if pck.IsKeyFrame {

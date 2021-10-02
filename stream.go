@@ -2,10 +2,11 @@ package main
 
 import (
 	"errors"
-	"log"
 	"time"
 
+	"github.com/deepch/vdk/av"
 	"github.com/deepch/vdk/format/rtspv2"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -25,13 +26,13 @@ func serveStreams() {
 func RTSPWorkerLoop(name, url string, OnDemand bool) {
 	defer Config.RunUnlock(name)
 	for {
-		log.Println(name, "Stream Try Connect")
+		log.Info().Msgf("%v Stream Try Connect", name)
 		err := RTSPWorker(name, url, OnDemand)
 		if err != nil {
-			log.Println(err)
+			log.Error().Err(err).Msg("Error running RTSPWorker")
 		}
 		if OnDemand && !Config.HasViewer(name) {
-			log.Println(name, ErrorStreamExitNoViewer)
+			log.Error().Err(ErrorStreamExitNoViewer).Msgf("No viewer for %v; exiting", name)
 			return
 		}
 		time.Sleep(1 * time.Second)
@@ -75,8 +76,52 @@ func RTSPWorker(name, url string, OnDemand bool) error {
 			if AudioOnly || packetAV.IsKeyFrame {
 				keyTest.Reset(20 * time.Second)
 			}
+			if packetAV.IsKeyFrame {
+				grabScreenshot(name, *packetAV)
+			}
 			//MuxerNVR.WritePacket(packetAV)
 			Config.cast(name, *packetAV)
 		}
 	}
+}
+
+func grabScreenshot(name string, pkt av.Packet) {
+	codecs := Config.codecGet(name)
+	var codec av.CodecData
+	for _, codec = range codecs {
+		if codec.Type() == av.H264 {
+			break
+		}
+	}
+	if codec == nil {
+		log.Error().Msg("No H264 codecs")
+		return
+	}
+
+	// decoder, err := ffmpeg.NewVideoDecoder(codec)
+	// if err != nil {
+	// 	log.Error().Err(err).Msg("VideoDecoder Error")
+	// 	return
+	// }
+	// frame, err := decoder.Decode(pkt.Data)
+	// if err != nil {
+	// 	log.Error().Err(err).Msg("Decode Error")
+	// 	return
+	// }
+	// buffer := new(bytes.Buffer)
+
+	// b := frame.Image.Bounds()
+	// log.Info().Msgf("image -----\nbounds: %v\nx: %v\n\ny: %v", b, frame.Image.CStride, frame.Image.YStride)
+	return
+	// m := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	// draw.Draw(m, m.Bounds(), &frame.Image, b.Min, draw.Src)
+
+	// err = jpeg.Encode(buffer, m, &jpeg.Options{
+	// 	Quality: 90,
+	// })
+	// if err != nil {
+	// 	log.Error().Err(err).Msg("JPEG encode Error")
+	// 	return
+	// }
+	// Config.screenshotSet(name, buffer)
 }
